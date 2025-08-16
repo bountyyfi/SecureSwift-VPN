@@ -36,7 +36,7 @@ Run as server:
 
 ./secureswift server <listen_ip> [port]
 
-## Default port is 443. Requires root privileges for TUN device access.
+ Default port is 443. Requires root privileges for TUN device access.
 Security Notes
 •  Uses /dev/urandom for cryptographically secure randomness.
 •  Implements 0-RTT key exchange for low-latency connections.
