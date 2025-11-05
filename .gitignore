@@ -1,6 +1,9 @@
 # Compiled binaries
 secureswift
 sswctl
+test_unit
+test_integration
+test_fuzz
 *.o
 *.ko
 *.ko.cmd
