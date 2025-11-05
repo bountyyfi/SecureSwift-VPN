@@ -1,0 +1,30 @@
+# Compiled binaries
+secureswift
+sswctl
+*.o
+*.ko
+*.ko.cmd
+*.mod
+*.mod.c
+*.mod.o
+*.symvers
+*.order
+
+# Build artifacts
+*.a
+*.so
+*.dylib
+
+# Kernel module build files
+.tmp_versions/
+Module.markers
+
+# Temporary files
+*.tmp
+*.swp
+*~
+.*.sw?
+
+# Test outputs
+/tmp/
+*.log
