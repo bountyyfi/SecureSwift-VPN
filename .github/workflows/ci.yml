@@ -262,6 +262,8 @@ jobs:
 
   release-validation:
     name: Release Validation
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: [security-audit, build-test, automated-test-suite, performance-test]
     # Note: multi-distro-test is optional (continue-on-error)
