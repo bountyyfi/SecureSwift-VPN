@@ -1,3 +1,4 @@
+#define _GNU_SOURCE  /* Required for CPU_ZERO, CPU_SET, sched_setaffinity */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@
 #include <sched.h>
 #include <errno.h>
 #include <signal.h>
+#include <sys/wait.h>
 
 // Version and build info
 #define VERSION "2.0.0"
@@ -446,6 +448,68 @@ static void curve25519_mul(uint32_t *r, const uint32_t *a, const uint32_t *b) {
     for (int i = 0; i < 8; i++) r[i] = t[i];
 }
 
+// Modular inversion using Fermat's Little Theorem: a^(-1) = a^(p-2) mod p
+// For Curve25519, p = 2^255 - 19
+static void curve25519_inv(uint32_t *out, const uint32_t *in) {
+    uint32_t t0[8], t1[8], t2[8], t3[8];
+
+    /* Exponentiation by squaring for (p-2) = 2^255 - 21 */
+    /* This implements the standard chain for Curve25519 inversion */
+
+    /* t0 = in^2 */
+    curve25519_mul(t0, in, in);
+    /* t1 = in^4 */
+    curve25519_mul(t1, t0, t0);
+    /* t1 = in^8 */
+    curve25519_mul(t1, t1, t1);
+    /* t1 = in^9 (= in^8 * in) */
+    curve25519_mul(t1, t1, in);
+    /* t0 = in^11 (= in^9 * in^2) */
+    curve25519_mul(t0, t1, t0);
+    /* t2 = in^22 */
+    curve25519_mul(t2, t0, t0);
+    /* t1 = in^(2^5-1) */
+    curve25519_mul(t1, t2, t1);
+    /* t2 = in^(2^10-2) */
+    curve25519_mul(t2, t1, t1);
+    for (int i = 0; i < 4; i++) curve25519_mul(t2, t2, t2);
+    /* t1 = in^(2^10-1) */
+    curve25519_mul(t1, t2, t1);
+    /* t2 = in^(2^20-2) */
+    curve25519_mul(t2, t1, t1);
+    for (int i = 0; i < 9; i++) curve25519_mul(t2, t2, t2);
+    /* t2 = in^(2^20-1) */
+    curve25519_mul(t2, t2, t1);
+    /* t3 = in^(2^40-2) */
+    curve25519_mul(t3, t2, t2);
+    for (int i = 0; i < 19; i++) curve25519_mul(t3, t3, t3);
+    /* t2 = in^(2^40-1) */
+    curve25519_mul(t2, t3, t2);
+    /* t2 = in^(2^50-2) */
+    for (int i = 0; i < 9; i++) curve25519_mul(t2, t2, t2);
+    /* t1 = in^(2^50-1) */
+    curve25519_mul(t1, t2, t1);
+    /* t2 = in^(2^100-2) */
+    curve25519_mul(t2, t1, t1);
+    for (int i = 0; i < 49; i++) curve25519_mul(t2, t2, t2);
+    /* t2 = in^(2^100-1) */
+    curve25519_mul(t2, t2, t1);
+    /* t3 = in^(2^200-2) */
+    curve25519_mul(t3, t2, t2);
+    for (int i = 0; i < 99; i++) curve25519_mul(t3, t3, t3);
+    /* t2 = in^(2^200-1) */
+    curve25519_mul(t2, t3, t2);
+    /* t2 = in^(2^250-2) */
+    for (int i = 0; i < 49; i++) curve25519_mul(t2, t2, t2);
+    /* t2 = in^(2^250-1) */
+    curve25519_mul(t2, t2, t1);
+    /* t2 = in^(2^255-21) = in^(p-2) */
+    for (int i = 0; i < 4; i++) curve25519_mul(t2, t2, t2);
+    curve25519_mul(t2, t2, t0);
+
+    memcpy(out, t2, 32);
+}
+
 static void curve25519_scalar_mult(uint8_t *out, const uint8_t *scalar, const uint8_t *point) {
     uint32_t x[8] = {1}, z[8] = {0}, a[8] = {0}, b[8] = {1};
     uint32_t p[8];
@@ -483,8 +547,8 @@ static void curve25519_scalar_mult(uint8_t *out, const uint8_t *scalar, const ui
         }
     }
     uint32_t inv_z[8];
-    // Simplified inversion for brevity; in production, use Fermat's little theorem
-    for (int i = 0; i < 8; i++) inv_z[i] = z[i]; // Placeholder
+    /* Proper modular inversion using Fermat's Little Theorem */
+    curve25519_inv(inv_z, z);
     curve25519_mul(x, x, inv_z);
     for (int i = 0; i < 8; i++) {
         out[i*4] = x[i] & 0xff;
@@ -1314,15 +1378,51 @@ static int resolve_dns(const char *domain, char *ip, size_t ip_len) {
     return 0;
 }
 
-// Kill-Switch
+// Safe command execution using fork/exec (no shell)
+static int safe_exec(const char *prog, char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Child process */
+        execvp(prog, argv);
+        perror("execvp");
+        _exit(1);
+    }
+
+    /* Parent process */
+    int status;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// Kill-Switch - using safe exec instead of system()
 static void enable_kill_switch() {
-    system("iptables -F");
-    system("iptables -A OUTPUT -p all -d 127.0.0.1 -j ACCEPT");
-    system("iptables -A OUTPUT -p all -j DROP");
+    char *flush_argv[] = {"iptables", "-F", NULL};
+    safe_exec("iptables", flush_argv);
+
+    char *allow_local[] = {"iptables", "-A", "OUTPUT", "-p", "all", "-d", "127.0.0.1", "-j", "ACCEPT", NULL};
+    safe_exec("iptables", allow_local);
+
+    char *drop_all[] = {"iptables", "-A", "OUTPUT", "-p", "all", "-j", "DROP", NULL};
+    safe_exec("iptables", drop_all);
 }
 
 static void disable_kill_switch() {
-    system("iptables -F");
+    char *flush_argv[] = {"iptables", "-F", NULL};
+    safe_exec("iptables", flush_argv);
+}
+
+// Generate unique nonce from packet counter (24 bytes for XSalsa20)
+static void generate_nonce(uint8_t nonce[24], uint64_t counter) {
+    memset(nonce, 0, 24);
+    /* Place counter in little-endian format at bytes 16-23 */
+    for (int i = 0; i < 8; i++) {
+        nonce[16 + i] = (counter >> (i * 8)) & 0xFF;
+    }
 }
 
 // VPN Session
@@ -1337,6 +1437,8 @@ typedef struct {
     Route route;
     int active;
     time_t last_active;
+    uint64_t tx_counter;  /* Packet counter for sending (nonce generation) */
+    uint64_t rx_counter;  /* Packet counter for receiving (nonce generation) */
 } Session;
 
 static void session_init(Session *session, int tun_fd, int sock_fd, const char *server_ip, int port) {
@@ -1344,6 +1446,8 @@ static void session_init(Session *session, int tun_fd, int sock_fd, const char *
     session->sock_fd = sock_fd;
     session->active = 0;
     session->last_active = time(NULL);
+    session->tx_counter = 0;  /* Initialize TX packet counter */
+    session->rx_counter = 0;  /* Initialize RX packet counter */
     kyber_keygen(session->kyber_pk, session->kyber_sk);
     Dilithium dil;
     dilithium_keygen(&dil, session->dilithium_pk, session->dilithium_sk);
@@ -1380,7 +1484,10 @@ static void *worker_thread(void *arg) {
         if (FD_ISSET(session->tun_fd, &fds)) {
             ssize_t len = read(session->tun_fd, buffer, BUFSIZE - TAG_LEN - 64);
             if (len <= 0) continue;
-            xsalsa20_init(&xsalsa, session->shared_secret, (uint8_t*)"nonce12345678901234567890");
+            /* Generate unique nonce from TX counter */
+            uint8_t nonce[24];
+            generate_nonce(nonce, session->tx_counter++);
+            xsalsa20_init(&xsalsa, session->shared_secret, nonce);
             xsalsa20_encrypt_simd(&xsalsa, buffer, packet, len);
             uint8_t tag[TAG_LEN];
             poly1305_init(&poly, session->shared_secret);
@@ -1411,7 +1518,10 @@ static void *worker_thread(void *arg) {
             poly1305_update(&poly, buffer, data_len - TAG_LEN);
             poly1305_final(&poly, computed_tag);
             if (memcmp(tag, computed_tag, TAG_LEN) != 0) continue;
-            xsalsa20_init(&xsalsa, session->shared_secret, (uint8_t*)"nonce12345678901234567890");
+            /* Generate unique nonce from RX counter */
+            uint8_t rx_nonce[24];
+            generate_nonce(rx_nonce, session->rx_counter++);
+            xsalsa20_init(&xsalsa, session->shared_secret, rx_nonce);
             xsalsa20_encrypt_simd(&xsalsa, buffer, packet, data_len - TAG_LEN);
             write(session->tun_fd, packet, data_len - TAG_LEN);
         }

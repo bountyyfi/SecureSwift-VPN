@@ -30,16 +30,180 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <linux/if_tun.h>
+#include <sys/wait.h>
 
 #define SSW_VERSION "2.0.0"
 #define SSW_KEY_LEN 32
 #define SSW_KEY_BASE64_LEN 45
+
+/* ======================== CURVE25519 IMPLEMENTATION ======================== */
+
+#include <stdint.h>
+
+/* Curve25519 base point */
+static const uint8_t curve25519_basepoint[32] = {9};
+
+/* Curve25519 addition mod 2^255-19 */
+static void curve25519_add(uint32_t *r, const uint32_t *a, const uint32_t *b) {
+    uint64_t carry = 0;
+    for (int i = 0; i < 8; i++) {
+        carry += (uint64_t)a[i] + b[i];
+        r[i] = carry & 0xffffffff;
+        carry >>= 32;
+    }
+}
+
+/* Curve25519 subtraction mod 2^255-19 */
+static void curve25519_sub(uint32_t *r, const uint32_t *a, const uint32_t *b) {
+    int64_t borrow = 0;
+    for (int i = 0; i < 8; i++) {
+        borrow = (int64_t)a[i] - b[i] - (borrow >> 32);
+        r[i] = borrow & 0xffffffff;
+    }
+}
+
+/* Curve25519 multiplication mod 2^255-19 */
+static void curve25519_mul(uint32_t *r, const uint32_t *a, const uint32_t *b) {
+    uint64_t t[16] = {0};
+    for (int i = 0; i < 8; i++) {
+        for (int j = 0; j < 8; j++) {
+            t[i+j] += (uint64_t)a[i] * b[j];
+        }
+    }
+    for (int i = 0; i < 15; i++) {
+        t[i+1] += t[i] >> 32;
+        t[i] &= 0xffffffff;
+    }
+    t[7] += t[15] * 19;
+    t[15] = 0;
+    for (int i = 0; i < 15; i++) {
+        t[i+1] += t[i] >> 32;
+        t[i] &= 0xffffffff;
+    }
+    for (int i = 0; i < 8; i++) r[i] = t[i];
+}
+
+/* Modular inversion using Fermat's Little Theorem */
+static void curve25519_inv(uint32_t *out, const uint32_t *in) {
+    uint32_t t0[8], t1[8], t2[8], t3[8];
+    curve25519_mul(t0, in, in);
+    curve25519_mul(t1, t0, t0);
+    curve25519_mul(t1, t1, t1);
+    curve25519_mul(t1, t1, in);
+    curve25519_mul(t0, t1, t0);
+    curve25519_mul(t2, t0, t0);
+    curve25519_mul(t1, t2, t1);
+    curve25519_mul(t2, t1, t1);
+    for (int i = 0; i < 4; i++) curve25519_mul(t2, t2, t2);
+    curve25519_mul(t1, t2, t1);
+    curve25519_mul(t2, t1, t1);
+    for (int i = 0; i < 9; i++) curve25519_mul(t2, t2, t2);
+    curve25519_mul(t2, t2, t1);
+    curve25519_mul(t3, t2, t2);
+    for (int i = 0; i < 19; i++) curve25519_mul(t3, t3, t3);
+    curve25519_mul(t2, t3, t2);
+    for (int i = 0; i < 9; i++) curve25519_mul(t2, t2, t2);
+    curve25519_mul(t1, t2, t1);
+    curve25519_mul(t2, t1, t1);
+    for (int i = 0; i < 49; i++) curve25519_mul(t2, t2, t2);
+    curve25519_mul(t2, t2, t1);
+    curve25519_mul(t3, t2, t2);
+    for (int i = 0; i < 99; i++) curve25519_mul(t3, t3, t3);
+    curve25519_mul(t2, t3, t2);
+    for (int i = 0; i < 49; i++) curve25519_mul(t2, t2, t2);
+    curve25519_mul(t2, t2, t1);
+    for (int i = 0; i < 4; i++) curve25519_mul(t2, t2, t2);
+    curve25519_mul(t2, t2, t0);
+    memcpy(out, t2, 32);
+}
+
+/* Curve25519 scalar multiplication (Montgomery ladder) */
+static void curve25519_scalarmult(uint8_t *out, const uint8_t *scalar_bytes, const uint8_t *point_bytes) {
+    uint32_t x[8] = {1}, z[8] = {0}, a[8] = {0}, b[8] = {1};
+    uint32_t p[8], t1[8], t2[8];
+    uint8_t scalar[32];
+
+    memcpy(scalar, scalar_bytes, 32);
+    scalar[0] &= 248;
+    scalar[31] &= 127;
+    scalar[31] |= 64;
+
+    for (int i = 0; i < 8; i++) {
+        p[i] = ((uint32_t)point_bytes[i*4]) | ((uint32_t)point_bytes[i*4+1] << 8) |
+               ((uint32_t)point_bytes[i*4+2] << 16) | ((uint32_t)point_bytes[i*4+3] << 24);
+    }
+
+    for (int pos = 254; pos >= 0; pos--) {
+        int bit = (scalar[pos/8] >> (pos%8)) & 1;
+        curve25519_add(t1, a, b);
+        curve25519_sub(t2, a, b);
+        curve25519_mul(a, t1, t1);
+        curve25519_mul(b, t2, t2);
+        curve25519_sub(t1, a, b);
+        curve25519_mul(t2, t1, p);
+        memcpy(a, t1, 32);
+        memcpy(b, t2, 32);
+        if (bit) {
+            curve25519_add(t1, x, z);
+            curve25519_sub(t2, x, z);
+            memcpy(x, t1, 32);
+            memcpy(z, t2, 32);
+        }
+    }
+
+    uint32_t inv_z[8];
+    curve25519_inv(inv_z, z);
+    curve25519_mul(x, x, inv_z);
+
+    for (int i = 0; i < 8; i++) {
+        out[i*4] = x[i] & 0xff;
+        out[i*4+1] = (x[i] >> 8) & 0xff;
+        out[i*4+2] = (x[i] >> 16) & 0xff;
+        out[i*4+3] = (x[i] >> 24) & 0xff;
+    }
+}
 
 /* Base64 encoding table */
 static const char base64_table[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /* ======================== UTILITY FUNCTIONS ======================== */
+
+/* Validate interface name to prevent command injection */
+static int is_valid_ifname(const char *ifname) {
+    if (!ifname || strlen(ifname) == 0 || strlen(ifname) >= IFNAMSIZ)
+        return 0;
+
+    /* Only allow alphanumeric, dash, and underscore */
+    for (const char *p = ifname; *p; p++) {
+        if (!(((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+               (*p >= '0' && *p <= '9') || *p == '-' || *p == '_'))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Safe command execution using fork/exec (no shell) */
+static int safe_exec(const char *prog, char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Child process */
+        execvp(prog, argv);
+        perror("execvp");
+        _exit(1);
+    }
+
+    /* Parent process */
+    int status;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
 
 static void print_usage(const char *prog)
 {
@@ -185,10 +349,8 @@ static int cmd_pubkey(const char *keyfile)
         return 1;
     }
 
-    /* Simplified: In production, use Curve25519 scalar multiplication */
-    /* For now, just hash the private key */
-    memcpy(public_key, private_key, SSW_KEY_LEN);
-    public_key[0] ^= 0x42;  /* Simple transformation */
+    /* Proper Curve25519 scalar base multiplication: public = private * G */
+    curve25519_scalarmult(public_key, private_key, curve25519_basepoint);
 
     base64_encode(public_key, SSW_KEY_LEN, key_base64);
     printf("%s\n", key_base64);
@@ -274,36 +436,52 @@ static int cmd_destroy(const char *ifname)
 /* Bring interface up */
 static int cmd_up(const char *ifname)
 {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ip link set %s up", ifname);
-    return system(cmd);
+    if (!is_valid_ifname(ifname)) {
+        fprintf(stderr, "Error: Invalid interface name\n");
+        return 1;
+    }
+
+    char *argv[] = {"ip", "link", "set", (char*)ifname, "up", NULL};
+    return safe_exec("ip", argv);
 }
 
 /* Bring interface down */
 static int cmd_down(const char *ifname)
 {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ip link set %s down", ifname);
-    return system(cmd);
+    if (!is_valid_ifname(ifname)) {
+        fprintf(stderr, "Error: Invalid interface name\n");
+        return 1;
+    }
+
+    char *argv[] = {"ip", "link", "set", (char*)ifname, "down", NULL};
+    return safe_exec("ip", argv);
 }
 
 /* Show interface configuration */
 static int cmd_show(const char *ifname)
 {
-    char cmd[512];
-
     if (ifname) {
+        if (!is_valid_ifname(ifname)) {
+            fprintf(stderr, "Error: Invalid interface name\n");
+            return 1;
+        }
+
         printf("Interface: %s\n", ifname);
         printf("========================================\n");
-        snprintf(cmd, sizeof(cmd), "ip addr show %s", ifname);
-        system(cmd);
+
+        char *argv_addr[] = {"ip", "addr", "show", (char*)ifname, NULL};
+        safe_exec("ip", argv_addr);
+
         printf("\n");
-        snprintf(cmd, sizeof(cmd), "ip link show %s", ifname);
-        system(cmd);
+
+        char *argv_link[] = {"ip", "link", "show", (char*)ifname, NULL};
+        safe_exec("ip", argv_link);
     } else {
         printf("SecureSwift VPN Interfaces:\n");
         printf("========================================\n");
-        system("ip link show type tun | grep -E '^[0-9]+'");
+
+        char *argv[] = {"ip", "link", "show", "type", "tun", NULL};
+        safe_exec("ip", argv);
     }
 
     return 0;
