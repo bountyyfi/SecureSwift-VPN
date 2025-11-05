@@ -1430,7 +1430,7 @@ static int stego_decode(uint8_t *data, size_t *data_len, const uint8_t *packet, 
 }
 
 // TUN Device Setup
-static int tun_alloc(char *dev) {
+static int tun_alloc(const char *dev_name) {
     struct ifreq ifr;
     int fd, err;
     if ((fd = open("/dev/net/tun", O_RDWR)) < 0) {
@@ -1439,15 +1439,15 @@ static int tun_alloc(char *dev) {
     }
     memset(&ifr, 0, sizeof(ifr));
     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-    if (*dev) strncpy(ifr.ifr_name, dev, IFNAMSIZ);
+    if (dev_name && *dev_name) {
+        strncpy(ifr.ifr_name, dev_name, IFNAMSIZ - 1);
+        ifr.ifr_name[IFNAMSIZ - 1] = '\0';  /* Ensure null termination */
+    }
     if ((err = ioctl(fd, TUNSETIFF, (void *)&ifr)) < 0) {
         perror("ioctl(TUNSETIFF)");
         close(fd);
         return err;
     }
-    /* Use strncpy instead of strcpy for security */
-    strncpy(dev, ifr.ifr_name, IFNAMSIZ - 1);
-    dev[IFNAMSIZ - 1] = '\0'; /* Ensure null termination */
     return fd;
 }
 
