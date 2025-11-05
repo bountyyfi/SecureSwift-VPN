@@ -76,19 +76,7 @@ The kernel module version of SecureSwift VPN provides **maximum performance** by
 
 ### Installation
 
-#### One-Line Install (Recommended)
-
-**Server:**
-```bash
-curl -sSL https://install.secureswift.io | sudo bash -s server 0.0.0.0 51820 --kernel
-```
-
-**Client:**
-```bash
-curl -sSL https://install.secureswift.io | sudo bash -s client <SERVER_IP> 51820 --kernel
-```
-
-#### Manual Install
+#### Install from Repository
 
 ```bash
 # Clone repository

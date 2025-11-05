@@ -30,19 +30,7 @@ SecureSwift is a **high-performance, post-quantum secure VPN** that surpasses Wi
 
 ## Quick Start (30 Seconds)
 
-### 🚀 One-Line Installation
-
-**Server (Kernel Mode - Maximum Performance):**
-```bash
-curl -sSL https://install.secureswift.io | sudo bash -s server 0.0.0.0 51820 --kernel
-```
-
-**Client (Kernel Mode):**
-```bash
-curl -sSL https://install.secureswift.io | sudo bash -s client <SERVER_IP> 51820 --kernel
-```
-
-**Or download and run locally:**
+### 🚀 Installation
 
 ### Server Installation
 ```bash
