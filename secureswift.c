@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <syslog.h>
 
 // Version and build info
 #define VERSION "2.0.0"
@@ -61,6 +62,105 @@
 #define CURVE25519_BYTES 32
 #define BLAKE3_OUT_LEN 32
 #define MAX_HOPS 3
+#define MAX_CONN_PER_IP 5         /* Max connections per IP */
+#define RATE_LIMIT_WINDOW 60      /* Rate limit window in seconds */
+#define MAX_PACKETS_PER_WINDOW 1000  /* Max packets per IP per window */
+#define FAIL2BAN_LOG "/var/log/secureswift-auth.log"  /* fail2ban log file */
+
+// DDoS Protection - Rate Limiting per IP
+typedef struct {
+    uint32_t ip;
+    time_t window_start;
+    uint32_t packet_count;
+    uint32_t conn_count;
+    time_t last_auth_fail;
+    uint32_t auth_fail_count;
+} RateLimitEntry;
+
+#define RATE_LIMIT_TABLE_SIZE 1024
+static RateLimitEntry rate_limit_table[RATE_LIMIT_TABLE_SIZE];
+static pthread_mutex_t rate_limit_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// fail2ban integration - log authentication failures
+static void fail2ban_log(const char *event, const char *ip, const char *reason) {
+    FILE *f = fopen(FAIL2BAN_LOG, "a");
+    if (!f) return;
+
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+    fprintf(f, "[%s] EVENT=%s IP=%s REASON=%s\n", timestamp, event, ip, reason);
+    fclose(f);
+
+    /* Also log to syslog for system monitoring */
+    openlog("secureswift", LOG_PID | LOG_CONS, LOG_AUTH);
+    syslog(LOG_WARNING, "EVENT=%s IP=%s REASON=%s", event, ip, reason);
+    closelog();
+}
+
+// Check and update rate limit for an IP
+static int rate_limit_check(uint32_t ip_addr, const char *ip_str) {
+    pthread_mutex_lock(&rate_limit_mutex);
+
+    uint32_t hash = ip_addr % RATE_LIMIT_TABLE_SIZE;
+    RateLimitEntry *entry = &rate_limit_table[hash];
+    time_t now = time(NULL);
+
+    /* Initialize or reset entry if it's a new IP or window expired */
+    if (entry->ip != ip_addr || (now - entry->window_start) > RATE_LIMIT_WINDOW) {
+        entry->ip = ip_addr;
+        entry->window_start = now;
+        entry->packet_count = 1;
+        entry->conn_count = 1;
+        entry->auth_fail_count = 0;
+        pthread_mutex_unlock(&rate_limit_mutex);
+        return 1;  /* Allow */
+    }
+
+    /* Check packet rate limit */
+    entry->packet_count++;
+    if (entry->packet_count > MAX_PACKETS_PER_WINDOW) {
+        pthread_mutex_unlock(&rate_limit_mutex);
+        fail2ban_log("RATE_LIMIT", ip_str, "Exceeded packet rate limit");
+        return 0;  /* Block */
+    }
+
+    /* Check connection limit */
+    if (entry->conn_count >= MAX_CONN_PER_IP) {
+        pthread_mutex_unlock(&rate_limit_mutex);
+        fail2ban_log("CONN_LIMIT", ip_str, "Exceeded connection limit");
+        return 0;  /* Block */
+    }
+
+    pthread_mutex_unlock(&rate_limit_mutex);
+    return 1;  /* Allow */
+}
+
+// Record authentication failure for fail2ban
+static void record_auth_failure(uint32_t ip_addr, const char *ip_str, const char *reason) {
+    pthread_mutex_lock(&rate_limit_mutex);
+
+    uint32_t hash = ip_addr % RATE_LIMIT_TABLE_SIZE;
+    RateLimitEntry *entry = &rate_limit_table[hash];
+    time_t now = time(NULL);
+
+    if (entry->ip == ip_addr) {
+        entry->auth_fail_count++;
+        entry->last_auth_fail = now;
+
+        /* Ban after 5 failed attempts within 10 minutes */
+        if (entry->auth_fail_count >= 5 && (now - entry->last_auth_fail) < 600) {
+            fail2ban_log("AUTH_FAIL_BAN", ip_str, reason);
+            pthread_mutex_unlock(&rate_limit_mutex);
+            return;
+        }
+    }
+
+    pthread_mutex_unlock(&rate_limit_mutex);
+    fail2ban_log("AUTH_FAIL", ip_str, reason);
+}
 
 // Secure Randomness
 static void get_random_bytes(uint8_t *out, size_t len) {
@@ -1615,7 +1715,23 @@ static int vpn_server(const char *listen_ip, int port) {
     struct sockaddr_in client;
     socklen_t client_len = sizeof(client);
     ssize_t len = recvfrom(sock_fd, auth_packet, sizeof(auth_packet), 0, (struct sockaddr*)&client, &client_len);
-    if (len != sizeof(auth_packet)) { close(sock_fd); close(tun_fd); return 1; }
+
+    /* DDoS Protection: Get client IP and check rate limit */
+    char client_ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client.sin_addr, client_ip_str, INET_ADDRSTRLEN);
+    uint32_t client_ip = ntohl(client.sin_addr.s_addr);
+
+    if (!rate_limit_check(client_ip, client_ip_str)) {
+        fprintf(stderr, "Rate limit exceeded for IP: %s\n", client_ip_str);
+        close(sock_fd); close(tun_fd);
+        return 1;
+    }
+
+    if (len != sizeof(auth_packet)) {
+        record_auth_failure(client_ip, client_ip_str, "Invalid packet size");
+        close(sock_fd); close(tun_fd);
+        return 1;
+    }
 
     uint8_t ss[32];
     kyber_dec(ss, auth_packet, session.kyber_sk);
@@ -1624,14 +1740,21 @@ static int vpn_server(const char *listen_ip, int port) {
     ZKP zkp;
     memcpy(&zkp, auth_packet + KYBER_CIPHERTEXTBYTES, sizeof(ZKP));
     if (!zkp_verify(&zkp, session.kyber_pk, KYBER_PUBLICKEYBYTES)) {
-        close(sock_fd); close(tun_fd); return 1;
+        record_auth_failure(client_ip, client_ip_str, "ZKP verification failed");
+        close(sock_fd); close(tun_fd);
+        return 1;
     }
 
     Dilithium dil;
     if (!dilithium_verify(&dil, auth_packet + KYBER_CIPHERTEXTBYTES + sizeof(ZKP),
                          auth_packet, KYBER_CIPHERTEXTBYTES + sizeof(ZKP), session.dilithium_pk)) {
-        close(sock_fd); close(tun_fd); return 1;
+        record_auth_failure(client_ip, client_ip_str, "Dilithium signature verification failed");
+        close(sock_fd); close(tun_fd);
+        return 1;
     }
+
+    /* Successful authentication */
+    fail2ban_log("AUTH_SUCCESS", client_ip_str, "Client authenticated successfully");
 
     // Start worker threads
     pthread_t threads[NUM_THREADS];
