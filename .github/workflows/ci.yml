@@ -58,11 +58,12 @@ jobs:
 
     - name: Compile userspace binary
       run: |
-        ${{ matrix.compiler }} -O3 -msse2 -march=native -mtune=native \
-          -fomit-frame-pointer -flto -fPIE -pie \
+        ${{ matrix.compiler }} -O3 -msse2 \
+          -fomit-frame-pointer -fPIE -pie \
           -Wall -Wextra -Werror=format-security \
           -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
           secureswift.c -o secureswift -lm -lpthread
+      timeout-minutes: 5
 
     - name: Check binary security
       run: |
@@ -136,6 +137,18 @@ jobs:
       run: |
         ./test_fuzz || echo "Fuzz tests completed (statistical failures OK if no crashes)"
 
+    - name: Compile quantum crypto tests
+      run: |
+        gcc -O2 -Wall -Wextra test_quantum.c -o test_quantum -lm -lpthread
+
+    - name: Run quantum crypto tests
+      run: |
+        ./test_quantum
+
+    - name: Compile end-to-end tests
+      run: |
+        gcc -O2 -Wall -Wextra test_e2e.c -o test_e2e -lm -lpthread
+
     - name: Run master test suite
       run: |
         chmod +x run_all_tests.sh
@@ -151,6 +164,8 @@ jobs:
           /tmp/unit_results.log
           /tmp/integration_results.log
           /tmp/fuzz_results.log
+          /tmp/quantum_results.log
+          /tmp/e2e_results.log
         retention-days: 30
 
   performance-test:

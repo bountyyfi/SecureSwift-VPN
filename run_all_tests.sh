@@ -55,7 +55,7 @@ if [ -n "$CI" ]; then
 fi
 
 # Step 1: Compile all tests
-print_header "Step 1/4: Compiling Test Suites"
+print_header "Step 1/6: Compiling Test Suites"
 
 echo "Compiling test_unit.c..."
 if gcc -O2 -Wall -Wextra test_unit.c -o test_unit -lm -lpthread 2>&1 | tee /tmp/unit_compile.log; then
@@ -84,10 +84,28 @@ else
     exit 1
 fi
 
+echo "Compiling test_quantum.c..."
+if gcc -O2 -Wall -Wextra test_quantum.c -o test_quantum -lm -lpthread 2>&1 | tee /tmp/quantum_compile.log; then
+    print_success "Quantum crypto tests compiled successfully"
+else
+    print_error "Quantum crypto tests compilation failed"
+    cat /tmp/quantum_compile.log
+    exit 1
+fi
+
+echo "Compiling test_e2e.c..."
+if gcc -O2 -Wall -Wextra test_e2e.c -o test_e2e -lm -lpthread 2>&1 | tee /tmp/e2e_compile.log; then
+    print_success "End-to-end tests compiled successfully"
+else
+    print_error "End-to-end tests compilation failed"
+    cat /tmp/e2e_compile.log
+    exit 1
+fi
+
 echo ""
 
 # Step 2: Run unit tests
-print_header "Step 2/4: Running Unit Tests"
+print_header "Step 2/6: Running Unit Tests"
 
 if ./test_unit 2>&1 | tee /tmp/unit_results.log; then
     UNIT_RESULT=0
@@ -100,7 +118,7 @@ fi
 echo ""
 
 # Step 3: Run integration tests
-print_header "Step 3/4: Running Integration Tests"
+print_header "Step 3/6: Running Integration Tests"
 
 if ./test_integration 2>&1 | tee /tmp/integration_results.log; then
     INTEGRATION_RESULT=0
@@ -113,7 +131,7 @@ fi
 echo ""
 
 # Step 4: Run fuzz tests
-print_header "Step 4/4: Running Fuzz Tests"
+print_header "Step 4/6: Running Fuzz Tests"
 
 if ./test_fuzz 2>&1 | tee /tmp/fuzz_results.log; then
     FUZZ_RESULT=0
@@ -123,6 +141,38 @@ else
     print_warning "Fuzz tests completed with warnings (no crashes detected)"
     # Fuzz tests are allowed to have statistical failures as long as no crashes
     FUZZ_RESULT=0  # Override - we only care about crashes
+fi
+
+echo ""
+
+# Step 5: Run quantum crypto tests
+print_header "Step 5/6: Running Quantum Cryptography Tests"
+
+if ./test_quantum 2>&1 | tee /tmp/quantum_results.log; then
+    QUANTUM_RESULT=0
+    print_success "Quantum crypto tests PASSED"
+else
+    QUANTUM_RESULT=$?
+    print_error "Quantum crypto tests FAILED"
+fi
+
+echo ""
+
+# Step 6: Run end-to-end tests (requires root)
+print_header "Step 6/6: Running End-to-End Tests"
+
+if [ "$(id -u)" -eq 0 ]; then
+    if ./test_e2e 2>&1 | tee /tmp/e2e_results.log; then
+        E2E_RESULT=0
+        print_success "End-to-end tests PASSED"
+    else
+        E2E_RESULT=$?
+        print_error "End-to-end tests FAILED"
+    fi
+else
+    print_warning "Skipping E2E tests (requires root privileges)"
+    E2E_RESULT=0  # Don't fail if not root
+    echo "0" > /tmp/e2e_results.log
 fi
 
 echo ""
@@ -165,10 +215,32 @@ else
     FUZZ_CRASHES=0
 fi
 
+# Extract quantum crypto test results
+if [ -f /tmp/quantum_results.log ]; then
+    QUANTUM_TOTAL=$(grep -oP "Total Tests:\s+\K\d+" /tmp/quantum_results.log || echo "0")
+    QUANTUM_PASSED=$(grep -oP "Passed:\s+\K\d+" /tmp/quantum_results.log || echo "0")
+    QUANTUM_FAILED=$(grep -oP "Failed:\s+\K\d+" /tmp/quantum_results.log || echo "0")
+else
+    QUANTUM_TOTAL=0
+    QUANTUM_PASSED=0
+    QUANTUM_FAILED=0
+fi
+
+# Extract E2E test results
+if [ -f /tmp/e2e_results.log ]; then
+    E2E_TOTAL=$(grep -oP "Total Tests:\s+\K\d+" /tmp/e2e_results.log || echo "0")
+    E2E_PASSED=$(grep -oP "Passed:\s+\K\d+" /tmp/e2e_results.log || echo "0")
+    E2E_FAILED=$(grep -oP "Failed:\s+\K\d+" /tmp/e2e_results.log || echo "0")
+else
+    E2E_TOTAL=0
+    E2E_PASSED=0
+    E2E_FAILED=0
+fi
+
 # Calculate totals
-TOTAL_TESTS=$((UNIT_TOTAL + INTEG_TOTAL + FUZZ_TOTAL))
-PASSED_TESTS=$((UNIT_PASSED + INTEG_PASSED + FUZZ_PASSED))
-FAILED_TESTS=$((UNIT_FAILED + INTEG_FAILED + FUZZ_FAILED))
+TOTAL_TESTS=$((UNIT_TOTAL + INTEG_TOTAL + FUZZ_TOTAL + QUANTUM_TOTAL + E2E_TOTAL))
+PASSED_TESTS=$((UNIT_PASSED + INTEG_PASSED + FUZZ_PASSED + QUANTUM_PASSED + E2E_PASSED))
+FAILED_TESTS=$((UNIT_FAILED + INTEG_FAILED + FUZZ_FAILED + QUANTUM_FAILED + E2E_FAILED))
 
 if [ $TOTAL_TESTS -gt 0 ]; then
     SUCCESS_RATE=$((PASSED_TESTS * 100 / TOTAL_TESTS))
@@ -205,6 +277,24 @@ else
     printf "${BLUE}║  ${RED}%-30s ${NC}%8d %8d %8d ${BLUE}║${NC}\n" "Fuzz Tests ✗ ($FUZZ_CRASHES crashes)" "$FUZZ_TOTAL" "$FUZZ_PASSED" "$FUZZ_FAILED"
 fi
 
+# Quantum crypto tests
+if [ $QUANTUM_RESULT -eq 0 ]; then
+    printf "${BLUE}║  ${GREEN}%-30s ${NC}%8d %8d %8d ${BLUE}║${NC}\n" "Quantum Crypto Tests ✓" "$QUANTUM_TOTAL" "$QUANTUM_PASSED" "$QUANTUM_FAILED"
+else
+    printf "${BLUE}║  ${RED}%-30s ${NC}%8d %8d %8d ${BLUE}║${NC}\n" "Quantum Crypto Tests ✗" "$QUANTUM_TOTAL" "$QUANTUM_PASSED" "$QUANTUM_FAILED"
+fi
+
+# E2E tests
+if [ $E2E_RESULT -eq 0 ]; then
+    if [ $E2E_TOTAL -gt 0 ]; then
+        printf "${BLUE}║  ${GREEN}%-30s ${NC}%8d %8d %8d ${BLUE}║${NC}\n" "End-to-End Tests ✓" "$E2E_TOTAL" "$E2E_PASSED" "$E2E_FAILED"
+    else
+        printf "${BLUE}║  ${YELLOW}%-30s ${NC}%8s %8s %8s ${BLUE}║${NC}\n" "End-to-End Tests (skipped)" "-" "-" "-"
+    fi
+else
+    printf "${BLUE}║  ${RED}%-30s ${NC}%8d %8d %8d ${BLUE}║${NC}\n" "End-to-End Tests ✗" "$E2E_TOTAL" "$E2E_PASSED" "$E2E_FAILED"
+fi
+
 echo -e "${BLUE}╠═══════════════════════════════════════════════════════════╣${NC}"
 printf "${BLUE}║  ${NC}%-30s %8d %8d %8d ${BLUE}║${NC}\n" "TOTAL" "$TOTAL_TESTS" "$PASSED_TESTS" "$FAILED_TESTS"
 echo -e "${BLUE}╠═══════════════════════════════════════════════════════════╣${NC}"
@@ -213,7 +303,7 @@ printf "${BLUE}║  ${NC}Success Rate: %3d%%                                    
 # Overall result
 OVERALL_RESULT=0
 
-if [ $UNIT_RESULT -ne 0 ] || [ $INTEGRATION_RESULT -ne 0 ] || [ $FUZZ_CRASHES -gt 0 ]; then
+if [ $UNIT_RESULT -ne 0 ] || [ $INTEGRATION_RESULT -ne 0 ] || [ $FUZZ_CRASHES -gt 0 ] || [ $QUANTUM_RESULT -ne 0 ] || [ $E2E_RESULT -ne 0 ]; then
     OVERALL_RESULT=1
 fi
 
@@ -259,7 +349,7 @@ if [ -z "$CI_MODE" ]; then
     read -p "Clean up test binaries? (y/n) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        rm -f test_unit test_integration test_fuzz
+        rm -f test_unit test_integration test_fuzz test_quantum test_e2e
         print_success "Test binaries cleaned up"
     fi
 fi
