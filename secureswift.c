@@ -16,16 +16,25 @@
 #include <pthread.h>
 #include <immintrin.h>
 #include <sched.h>
+#include <errno.h>
+#include <signal.h>
+
+// Version and build info
+#define VERSION "2.0.0"
+#define BUILD_DATE __DATE__
+#define BUILD_TIME __TIME__
 
 // Constants
-#define PORT 443
-#define BUFSIZE 2000
+#define PORT 51820
+#define BUFSIZE 2048
 #define TUN_NAME "tun0"
 #define MIN_MTU 1280
-#define MAX_MTU 1400
+#define MAX_MTU 1420
 #define NUM_THREADS 8
 #define SESSION_TIMEOUT 300
 #define TAG_LEN 16
+#define MAX_PACKET_SIZE 65535
+#define KEEPALIVE_INTERVAL 25
 #define KYBER_K 3
 #define KYBER_N 256
 #define KYBER_Q 3329
@@ -1124,8 +1133,6 @@ static void dilithium_sign(Dilithium *self, uint8_t *sig, const uint8_t *msg, si
         }
 
         dilithium_polyvec_tobytes(sig, &z, DILITHIUM_L);
-        memcpy(sig + DILITHIUM_L * KYBER_POLYBYTES, (uint8_t*)&c, KYBER_POLYBYTES
-        dilithium_polyvec_tobytes(sig, &z, DILITHIUM_L);
         memcpy(sig + DILITHIUM_L * KYBER_POLYBYTES, (uint8_t*)&c, KYBER_POLYBYTES);
         dilithium_polyvec_tobytes(sig + DILITHIUM_L * KYBER_POLYBYTES + KYBER_POLYBYTES, &w1, DILITHIUM_K);
         break; // Signature found
@@ -1274,7 +1281,9 @@ static int tun_alloc(char *dev) {
         close(fd);
         return err;
     }
-    strcpy(dev, ifr.ifr_name);
+    /* Use strncpy instead of strcpy for security */
+    strncpy(dev, ifr.ifr_name, IFNAMSIZ - 1);
+    dev[IFNAMSIZ - 1] = '\0'; /* Ensure null termination */
     return fd;
 }
 

@@ -71,7 +71,7 @@ jobs:
         readelf -l secureswift | grep STACK
 
     - name: Upload binary artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: secureswift-${{ matrix.os }}-${{ matrix.compiler }}
         path: secureswift
