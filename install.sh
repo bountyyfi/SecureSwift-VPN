@@ -154,15 +154,25 @@ create_directories() {
 configure_network() {
     print_info "Configuring network..."
 
-    # Load TUN module (manual load only, not on boot)
+    # Load TUN module
     if ! lsmod | grep -q tun; then
         modprobe tun
     fi
 
-    # Enable IP forwarding (runtime only)
+    # Make TUN module load on boot
+    if ! grep -q "^tun$" /etc/modules 2>/dev/null; then
+        echo "tun" >> /etc/modules
+    fi
+
+    # Enable IP forwarding
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
 
-    print_success "Network configured (manual mode - no auto-load on boot)"
+    # Make IP forwarding persistent
+    if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    fi
+
+    print_success "Network configured (auto-loads on boot)"
 }
 
 # Setup server
@@ -229,15 +239,21 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$LOG_DIR
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-    # Reload systemd (do NOT enable auto-start)
+    # Reload systemd, enable and start service automatically
     systemctl daemon-reload
+    systemctl enable secureswift-server.service
+    systemctl start secureswift-server.service
 
-    print_success "Server setup complete!"
+    print_success "Server setup complete and running!"
     print_info ""
-    print_info "To start the server manually:"
-    print_info "  systemctl start secureswift-server"
+    print_info "Service auto-starts on boot"
+    print_info "Current status:"
+    print_info "  systemctl status secureswift-server"
     print_info ""
     print_info "To check status:"
     print_info "  systemctl status secureswift-server"
@@ -312,15 +328,21 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$LOG_DIR
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-    # Reload systemd (do NOT enable auto-start)
+    # Reload systemd, enable and start service automatically
     systemctl daemon-reload
+    systemctl enable secureswift-client.service
+    systemctl start secureswift-client.service
 
-    print_success "Client setup complete!"
+    print_success "Client setup complete and running!"
     print_info ""
-    print_info "To start the client manually:"
-    print_info "  systemctl start secureswift-client"
+    print_info "Service auto-starts on boot"
+    print_info "Current status:"
+    print_info "  systemctl status secureswift-client"
     print_info ""
     print_info "To check status:"
     print_info "  systemctl status secureswift-client"
@@ -402,9 +424,11 @@ main() {
     print_info ""
 
     if [ "$MODE" = "server" ]; then
-        print_info "Start with: systemctl start secureswift-server"
+        print_success "✓ Server is running and auto-starts on boot"
+        print_info "Clients can now connect to this server!"
     else
-        print_info "Start with: systemctl start secureswift-client"
+        print_success "✓ Client is running and auto-starts on boot"
+        print_info "VPN connection is active!"
     fi
 }
 
