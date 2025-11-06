@@ -1582,20 +1582,30 @@ static void *worker_thread(void *arg) {
         if (ret < 0) break;
 
         if (FD_ISSET(session->tun_fd, &fds)) {
-            ssize_t len = read(session->tun_fd, buffer, BUFSIZE - TAG_LEN - 64);
+            ssize_t len = read(session->tun_fd, buffer, BUFSIZE - TAG_LEN - 64 - 8);
             if (len <= 0) continue;
-            /* Generate unique nonce from TX counter */
+
+            /* FIXED: Include counter in packet so receiver knows which nonce to use */
+            uint64_t counter = session->tx_counter++;
             uint8_t nonce[24];
-            generate_nonce(nonce, session->tx_counter++);
+            generate_nonce(nonce, counter);
+
+            /* Encrypt the data */
             xsalsa20_init(&xsalsa, session->shared_secret, nonce);
-            xsalsa20_encrypt_simd(&xsalsa, buffer, packet, len);
+            xsalsa20_encrypt_simd(&xsalsa, buffer, packet + 8, len);
+
+            /* Prepend counter to packet */
+            memcpy(packet, &counter, 8);
+
+            /* Compute MAC over [counter || encrypted_data] */
             uint8_t tag[TAG_LEN];
             poly1305_init(&poly, session->shared_secret);
-            poly1305_update(&poly, packet, len);
+            poly1305_update(&poly, packet, 8 + len);  /* MAC includes counter */
             poly1305_final(&poly, tag);
-            memcpy(packet + len, tag, TAG_LEN);
-            size_t packet_len = len + TAG_LEN;
-            stego_encode(packet, &packet_len, packet, len + TAG_LEN);
+            memcpy(packet + 8 + len, tag, TAG_LEN);
+
+            size_t packet_len = 8 + len + TAG_LEN;
+            stego_encode(packet, &packet_len, packet, 8 + len + TAG_LEN);
             struct sockaddr_in server;
             memset(&server, 0, sizeof(server));
             server.sin_family = AF_INET;
@@ -1608,22 +1618,33 @@ static void *worker_thread(void *arg) {
             struct sockaddr_in client;
             socklen_t client_len = sizeof(client);
             ssize_t len = recvfrom(session->sock_fd, packet, BUFSIZE, 0, (struct sockaddr*)&client, &client_len);
-            if (len <= TAG_LEN + 64) continue;
+            if (len <= TAG_LEN + 64 + 8) continue;
+
             size_t data_len;
             if (!stego_decode(buffer, &data_len, packet, len)) continue;
-            if (data_len <= TAG_LEN) continue;
+            if (data_len <= TAG_LEN + 8) continue;
+
+            /* FIXED: Extract counter from packet header */
+            uint64_t counter;
+            memcpy(&counter, buffer, 8);
+
+            /* Verify MAC over [counter || encrypted_data] */
             uint8_t tag[TAG_LEN], computed_tag[TAG_LEN];
             memcpy(tag, buffer + data_len - TAG_LEN, TAG_LEN);
             poly1305_init(&poly, session->shared_secret);
             poly1305_update(&poly, buffer, data_len - TAG_LEN);
             poly1305_final(&poly, computed_tag);
             if (memcmp(tag, computed_tag, TAG_LEN) != 0) continue;
-            /* Generate unique nonce from RX counter */
+
+            /* FIXED: Use sender's counter to generate matching nonce */
             uint8_t rx_nonce[24];
-            generate_nonce(rx_nonce, session->rx_counter++);
+            generate_nonce(rx_nonce, counter);
+
+            /* FIXED: Decrypt (XSalsa20 encrypt/decrypt same op with matching nonce) */
             xsalsa20_init(&xsalsa, session->shared_secret, rx_nonce);
-            xsalsa20_encrypt_simd(&xsalsa, buffer, packet, data_len - TAG_LEN);
-            write(session->tun_fd, packet, data_len - TAG_LEN);
+            xsalsa20_encrypt_simd(&xsalsa, buffer + 8, packet, data_len - TAG_LEN - 8);
+
+            write(session->tun_fd, packet, data_len - TAG_LEN - 8);
         }
         session->last_active = time(NULL);
     }
@@ -1643,18 +1664,17 @@ static int vpn_client(const char *server_ip, int port) {
     session_init(&session, tun_fd, sock_fd, server_ip, port);
     session.active = 1;
 
-    // Key Exchange with 0-RTT
+    // FIXED: Key Exchange with 0-RTT (removed fake ZKP, use only Dilithium)
     uint8_t ct[KYBER_CIPHERTEXTBYTES], ss[32];
     kyber_enc(ct, ss, session.route.hops[0].pubkey);
     memcpy(session.shared_secret, ss, 32);
 
-    ZKP zkp;
-    zkp_prove(&zkp, session.shared_secret, session.kyber_pk, KYBER_PUBLICKEYBYTES);
-    uint8_t auth_packet[KYBER_CIPHERTEXTBYTES + sizeof(ZKP) + DILITHIUM_SIGBYTES];
+    /* Use Dilithium signature for authentication (no need for redundant ZKP) */
+    uint8_t auth_packet[KYBER_CIPHERTEXTBYTES + DILITHIUM_SIGBYTES];
     memcpy(auth_packet, ct, KYBER_CIPHERTEXTBYTES);
-    memcpy(auth_packet + KYBER_CIPHERTEXTBYTES, &zkp, sizeof(ZKP));
     Dilithium dil;
-    dilithium_sign(&dil, auth_packet + KYBER_CIPHERTEXTBYTES + sizeof(ZKP), auth_packet, KYBER_CIPHERTEXTBYTES + sizeof(ZKP), session.dilithium_sk);
+    /* Sign the Kyber ciphertext to authenticate it */
+    dilithium_sign(&dil, auth_packet + KYBER_CIPHERTEXTBYTES, ct, KYBER_CIPHERTEXTBYTES, session.dilithium_sk);
 
     struct sockaddr_in server;
     memset(&server, 0, sizeof(server));
@@ -1711,7 +1731,8 @@ static int vpn_server(const char *listen_ip, int port) {
     session.active = 1;
 
     // Receive initial auth packet
-    uint8_t auth_packet[KYBER_CIPHERTEXTBYTES + sizeof(ZKP) + DILITHIUM_SIGBYTES];
+    /* FIXED: Removed ZKP, use only Dilithium signature */
+    uint8_t auth_packet[KYBER_CIPHERTEXTBYTES + DILITHIUM_SIGBYTES];
     struct sockaddr_in client;
     socklen_t client_len = sizeof(client);
     ssize_t len = recvfrom(sock_fd, auth_packet, sizeof(auth_packet), 0, (struct sockaddr*)&client, &client_len);
@@ -1733,21 +1754,15 @@ static int vpn_server(const char *listen_ip, int port) {
         return 1;
     }
 
+    /* Decrypt the Kyber ciphertext to get shared secret */
     uint8_t ss[32];
     kyber_dec(ss, auth_packet, session.kyber_sk);
     memcpy(session.shared_secret, ss, 32);
 
-    ZKP zkp;
-    memcpy(&zkp, auth_packet + KYBER_CIPHERTEXTBYTES, sizeof(ZKP));
-    if (!zkp_verify(&zkp, session.kyber_pk, KYBER_PUBLICKEYBYTES)) {
-        record_auth_failure(client_ip, client_ip_str, "ZKP verification failed");
-        close(sock_fd); close(tun_fd);
-        return 1;
-    }
-
+    /* Verify Dilithium signature over Kyber ciphertext */
     Dilithium dil;
-    if (!dilithium_verify(&dil, auth_packet + KYBER_CIPHERTEXTBYTES + sizeof(ZKP),
-                         auth_packet, KYBER_CIPHERTEXTBYTES + sizeof(ZKP), session.dilithium_pk)) {
+    if (!dilithium_verify(&dil, auth_packet + KYBER_CIPHERTEXTBYTES,
+                         auth_packet, KYBER_CIPHERTEXTBYTES, session.dilithium_pk)) {
         record_auth_failure(client_ip, client_ip_str, "Dilithium signature verification failed");
         close(sock_fd); close(tun_fd);
         return 1;
