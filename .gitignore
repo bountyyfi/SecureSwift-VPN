@@ -6,6 +6,7 @@ test_integration
 test_fuzz
 test_quantum
 test_e2e
+test_crypto_real
 *.o
 *.ko
 *.ko.cmd
