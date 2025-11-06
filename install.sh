@@ -154,25 +154,15 @@ create_directories() {
 configure_network() {
     print_info "Configuring network..."
 
-    # Load TUN module
+    # Load TUN module (manual load only, not on boot)
     if ! lsmod | grep -q tun; then
         modprobe tun
     fi
 
-    # Make TUN module load on boot
-    if ! grep -q "^tun$" /etc/modules 2>/dev/null; then
-        echo "tun" >> /etc/modules
-    fi
-
-    # Enable IP forwarding
+    # Enable IP forwarding (runtime only)
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
 
-    # Make IP forwarding persistent
-    if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
-        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-    fi
-
-    print_success "Network configured"
+    print_success "Network configured (manual mode - no auto-load on boot)"
 }
 
 # Setup server
@@ -239,18 +229,14 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$LOG_DIR
-
-[Install]
-WantedBy=multi-user.target
 EOF
 
-    # Reload systemd and enable service
+    # Reload systemd (do NOT enable auto-start)
     systemctl daemon-reload
-    systemctl enable secureswift-server.service
 
     print_success "Server setup complete!"
     print_info ""
-    print_info "To start the server:"
+    print_info "To start the server manually:"
     print_info "  systemctl start secureswift-server"
     print_info ""
     print_info "To check status:"
@@ -326,18 +312,14 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$LOG_DIR
-
-[Install]
-WantedBy=multi-user.target
 EOF
 
-    # Reload systemd and enable service
+    # Reload systemd (do NOT enable auto-start)
     systemctl daemon-reload
-    systemctl enable secureswift-client.service
 
     print_success "Client setup complete!"
     print_info ""
-    print_info "To start the client:"
+    print_info "To start the client manually:"
     print_info "  systemctl start secureswift-client"
     print_info ""
     print_info "To check status:"
