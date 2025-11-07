@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/bountyyfi/SecureSwift-VPN/main/inst
 ### 🔧 Operational Features
 - ✅ **Auto-restart** - Service recovers automatically
 - ✅ **Health checks** - Every 30s monitoring
-- ✅ **Prometheus metrics** - Real-time stats on :9100
+- ✅ **Prometheus metrics** - Secured, localhost-only on :9100
 - ✅ **Auto-starts on boot** - Zero manual intervention
 - ✅ **Systemd watchdog** - Auto-restart if hung
 
@@ -90,8 +90,11 @@ kubectl apply -f https://raw.githubusercontent.com/bountyyfi/SecureSwift-VPN/mai
 # Check service status
 systemctl status secureswift-server  # or secureswift-client
 
-# View metrics (Prometheus format)
+# View metrics (Prometheus format, localhost only)
 curl http://localhost:9100/metrics
+
+# View metrics authentication token
+cat /etc/secureswift/metrics-token
 
 # View logs
 journalctl -u secureswift-server -f

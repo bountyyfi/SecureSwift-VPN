@@ -56,7 +56,7 @@ sudo ./install.sh client SERVER_IP 443
 4. ✅ Sets up **DDoS protection** firewall rules
 5. ✅ Creates systemd service with **realtime priority**
 6. ✅ Enables **health checks** (every 30s)
-7. ✅ Starts **Prometheus metrics** endpoint (:9100)
+7. ✅ Starts **Prometheus metrics** endpoint (:9100, secured, localhost-only)
 8. ✅ Configures **auto-start on boot**
 9. ✅ Starts VPN service immediately
 
@@ -65,7 +65,7 @@ sudo ./install.sh client SERVER_IP 443
 - ✅ DDoS protection (rate limiting + SYN flood defense)
 - ✅ Auto-restart on failure
 - ✅ Health monitoring every 30s
-- ✅ Prometheus metrics on port 9100
+- ✅ Prometheus metrics on port 9100 (secured, localhost-only)
 - ✅ Firewall NAT configuration
 - ✅ 10Gbps+ performance tuning
 
@@ -129,8 +129,11 @@ systemctl status secureswift-healthcheck.timer
 # View logs
 journalctl -u secureswift-server -f
 
-# Check metrics
+# Check metrics (localhost only)
 curl http://localhost:9100/metrics
+
+# View metrics authentication token
+cat /etc/secureswift/metrics-token
 ```
 
 #### Client:
@@ -207,8 +210,11 @@ sudo tail -f /var/log/secureswift/server-error.log
 
 #### Monitor Metrics
 ```bash
-# View all metrics
+# View all metrics (localhost only)
 curl http://localhost:9100/metrics
+
+# View metrics authentication token
+cat /etc/secureswift/metrics-token
 
 # Watch specific metric
 watch -n 1 'curl -s http://localhost:9100/metrics | grep secureswift_rx_bytes'
@@ -362,13 +368,22 @@ sudo journalctl -u secureswift-healthcheck -n 50
 
 ### Prometheus Integration
 
+The metrics endpoint is secured and only accessible from localhost. For remote Prometheus monitoring, use SSH tunneling:
+
+```bash
+# On Prometheus server, create SSH tunnel to VPN server
+ssh -L 9100:localhost:9100 user@SERVER_IP -N -f
+```
+
 Add to your Prometheus config:
 
 ```yaml
 scrape_configs:
   - job_name: 'secureswift'
     static_configs:
-      - targets: ['SERVER_IP:9100']
+      - targets: ['localhost:9100']
+    # Or if running Prometheus on the VPN server itself:
+    # - targets: ['127.0.0.1:9100']
 ```
 
 ### Grafana Dashboard
