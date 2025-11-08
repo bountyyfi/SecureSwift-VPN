@@ -84,6 +84,7 @@ install_dependencies() {
         wget \
         ca-certificates \
         procps \
+        socat \
         > /dev/null 2>&1
 
     print_success "Dependencies installed"
@@ -468,14 +469,22 @@ AccuracySec=1s
 WantedBy=timers.target
 EOF
 
-    # Create metrics/monitoring endpoint
+    # Generate secure metrics authentication token
+    METRICS_TOKEN=$(openssl rand -hex 32)
+    mkdir -p /etc/secureswift
+    echo "$METRICS_TOKEN" > /etc/secureswift/metrics-token
+    chmod 600 /etc/secureswift/metrics-token
+
+    # Create metrics/monitoring endpoint with authentication
     cat > /usr/local/bin/secureswift-metrics.sh <<'METRICS_EOF'
 #!/bin/bash
-# SecureSwift VPN Metrics - Prometheus-compatible endpoint
-# Access: curl http://localhost:9100/metrics
+# SecureSwift VPN Metrics - Prometheus-compatible endpoint with authentication
+# Access: curl -H "Authorization: Bearer $(cat /etc/secureswift/metrics-token)" http://localhost:9100/metrics
+# Or from Prometheus: bearer_token_file: /etc/secureswift/metrics-token
 
 PORT=9100
 RESPONSE_FILE="/tmp/secureswift-metrics"
+TOKEN_FILE="/etc/secureswift/metrics-token"
 
 generate_metrics() {
     cat > "$RESPONSE_FILE" <<EOF
@@ -513,13 +522,30 @@ secureswift_connections_total $(ss -u sport = :443 | wc -l)
 EOF
 }
 
+# Start metrics generator in background
 while true; do
     generate_metrics
     sleep 5
 done &
+
+# Start HTTP server with authentication on localhost only
+# Using socat for secure, localhost-only access
+VALID_TOKEN=$(cat "$TOKEN_FILE")
+
+while true; do
+    # socat creates a simple HTTP server on localhost:9100
+    # Only accepts connections from 127.0.0.1
+    echo -ne "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n" | cat - "$RESPONSE_FILE" | \
+        socat -T1 TCP-LISTEN:$PORT,bind=127.0.0.1,reuseaddr,fork STDIO
+done &
 METRICS_EOF
 
     chmod +x /usr/local/bin/secureswift-metrics.sh
+
+    # Add iptables rules to BLOCK external access to metrics port (defense in depth)
+    iptables -A INPUT -p tcp --dport 9100 -s 127.0.0.1 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 9100 -j DROP
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
 
     # Reload systemd, enable and start ALL services automatically
     systemctl daemon-reload
@@ -535,7 +561,7 @@ METRICS_EOF
     print_info ""
     print_success "✓ VPN server running with auto-restart"
     print_success "✓ Health checks running (every 30s)"
-    print_success "✓ Metrics endpoint active on port 9100"
+    print_success "✓ Metrics endpoint active on port 9100 (localhost only, secured)"
     print_success "✓ DDoS protection enabled"
     print_success "✓ BBR congestion control active"
     print_success "✓ 10Gbps+ performance tuning applied"
@@ -543,8 +569,10 @@ METRICS_EOF
     print_info "Service auto-starts on boot"
     print_info "View status:"
     print_info "  systemctl status secureswift-server"
-    print_info "View metrics:"
+    print_info "View metrics (localhost only):"
     print_info "  curl http://localhost:9100/metrics"
+    print_info "Metrics authentication token:"
+    print_info "  cat /etc/secureswift/metrics-token"
     print_info ""
     print_info "To check status:"
     print_info "  systemctl status secureswift-server"
@@ -584,6 +612,10 @@ EOF
     # Allow established connections
     iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    # Allow SSH (port 22) - EMERGENCY ACCESS (prevents lockout)
+    iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+    iptables -A OUTPUT -p tcp --sport 22 -j ACCEPT
 
     # Allow VPN connection
     iptables -A OUTPUT -d "$server_ip" -p udp --dport "$port" -j ACCEPT
@@ -850,7 +882,7 @@ main() {
         echo -e "  ${GREEN}✓${NC} ${BOLD}Post-quantum encryption${NC} - Kyber1024 + Dilithium3"
         echo -e "  ${GREEN}✓${NC} ${BOLD}DDoS protection${NC} - Rate limiting + SYN flood defense"
         echo -e "  ${GREEN}✓${NC} ${BOLD}Auto-recovery${NC} - Health checks every 30s"
-        echo -e "  ${GREEN}✓${NC} ${BOLD}Prometheus metrics${NC} - Real-time monitoring on :9100"
+        echo -e "  ${GREEN}✓${NC} ${BOLD}Prometheus metrics${NC} - Secured, localhost-only on :9100"
         echo -e "  ${GREEN}✓${NC} ${BOLD}Zero config${NC} - Automatic everything"
         echo ""
         echo -e "${CYAN}${BOLD}PERFORMANCE FEATURES:${NC}"

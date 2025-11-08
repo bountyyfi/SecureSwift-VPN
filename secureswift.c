@@ -675,7 +675,7 @@ static const int16_t zetas[128] = {
     2817, 2813, 2794, 2772, 2671, 2658, 2633, 2620, 2591, 2571, 2553, 2523, 2492, 2472, 2462,
     2457, 2451, 2433, 2428, 2398, 2391, 2386, 2373, 2359, 2328, 2314, 2211, 2198, 2182, 2153,
     2039, 1978, 1921, 1862, 1842, 1823, 1784, 1711, 1698, 1630, 1581, 1555, 1505, 1418, 1399,
-    1315, 1232, 1211, 1143, 960, 910, 833, 779, 741, 677, 639, 612, 566, 0
+    1315, 1232, 1211, 1143, 960, 910, 833, 779, 741, 677, 639, 612, 566
 };
 
 static int32_t montgomery_reduce(int64_t a) {
@@ -749,19 +749,23 @@ static void polyvec_ntt(polyvec *r) {
     }
 }
 
-static void polyvec_invntt(polyvec *r) {
-    for (int i = 0; i < KYBER_K; i++) {
-        unsigned int len = 2, k = 127;
-        for (len = 2; len <= 128; len <<= 1) {
-            for (unsigned int start = 0; start < KYBER_N; start += 2 * len) {
-                int32_t zeta = -zetas[k--];
-                for (unsigned int j = start; j < start + len; j++) {
-                    int32_t t = r->vec[i].coeffs[j];
-                    r->vec[i].coeffs[j] = csubq(t + r->vec[i].coeffs[j + len]);
-                    r->vec[i].coeffs[j + len] = montgomery_reduce((int64_t)zeta * (r->vec[i].coeffs[j + len] - t));
-                }
+static void poly_invntt(poly *r) {
+    unsigned int len = 2, k = 127;
+    for (len = 2; len <= 128; len <<= 1) {
+        for (unsigned int start = 0; start < KYBER_N; start += 2 * len) {
+            int32_t zeta = -zetas[k--];
+            for (unsigned int j = start; j < start + len; j++) {
+                int32_t t = r->coeffs[j];
+                r->coeffs[j] = csubq(t + r->coeffs[j + len]);
+                r->coeffs[j + len] = montgomery_reduce((int64_t)zeta * (r->coeffs[j + len] - t));
             }
         }
+    }
+}
+
+static void polyvec_invntt(polyvec *r) {
+    for (int i = 0; i < KYBER_K; i++) {
+        poly_invntt(&r->vec[i]);
         for (unsigned int j = 0; j < KYBER_N; j++) {
             r->vec[i].coeffs[j] = montgomery_reduce((int64_t)r->vec[i].coeffs[j] * 3303);
         }
@@ -978,7 +982,7 @@ static void kyber_enc(uint8_t *ct, uint8_t *ss, const uint8_t *pk) {
     polyvec_csubq(&b);
 
     polyvec_pointwise_acc_montgomery(&v, &pkpv, &sp);
-    polyvec_invntt(&v);
+    poly_invntt(&v);
     poly_add(&v, &v, &epp);
     poly_reduce(&v);
     poly_csubq(&v);
@@ -1000,7 +1004,7 @@ static void kyber_dec(uint8_t *ss, const uint8_t *ct, const uint8_t *sk) {
 
     polyvec_ntt(&b);
     polyvec_pointwise_acc_montgomery(&mp, &s, &b);
-    polyvec_invntt(&mp);
+    poly_invntt(&mp);
     poly_sub(&mp, &v, &mp);
     poly_reduce(&mp);
     poly_csubq(&mp);
@@ -1090,7 +1094,7 @@ static void dilithium_polyvec_invntt(polyvec *r, int l) {
     }
 }
 
-static void dilithium_polyvec_pointwise_acc_montgomery(poly *r, const polyvec *a, const polyvec *b, int l, int k) {
+static void dilithium_polyvec_pointwise_acc_montgomery(poly *r, const polyvec *a, const polyvec *b, int l __attribute__((unused)), int k) {
     poly_pointwise_montgomery(r, &a->vec[0], &b->vec[0]);
     for (int i = 1; i < k; i++) {
         poly tmp;
@@ -1217,7 +1221,7 @@ static void dilithium_keygen(Dilithium *self, uint8_t *pk, uint8_t *sk) {
     memcpy(sk + DILITHIUM_K * KYBER_POLYBYTES + 32 + (DILITHIUM_L + DILITHIUM_K) * KYBER_POLYBYTES, self->tr, 32);
 }
 
-static void dilithium_sign(Dilithium *self, uint8_t *sig, const uint8_t *msg, size_t msg_len, const uint8_t *sk) {
+static void dilithium_sign(Dilithium *self __attribute__((unused)), uint8_t *sig, const uint8_t *msg, size_t msg_len, const uint8_t *sk) {
     polyvec a[DILITHIUM_K], s1, s2, y, z;
     poly c;
     uint8_t rho[32], tr[32];
@@ -1302,7 +1306,7 @@ static void dilithium_sign(Dilithium *self, uint8_t *sig, const uint8_t *msg, si
     }
 }
 
-static int dilithium_verify(Dilithium *self, const uint8_t *sig, const uint8_t *msg, size_t msg_len, const uint8_t *pk) {
+static int dilithium_verify(Dilithium *self __attribute__((unused)), const uint8_t *sig, const uint8_t *msg, size_t msg_len, const uint8_t *pk) {
     polyvec a[DILITHIUM_K], t1, z, w1;
     poly c;
     uint8_t rho[32], tr[32];
@@ -1389,6 +1393,7 @@ static void zkp_prove(ZKP *zkp, const uint8_t *secret, const uint8_t *public_dat
     blake3_final(&b, zkp->response);
 }
 
+__attribute__((unused))
 static int zkp_verify(const ZKP *zkp, const uint8_t *public_data, size_t public_len) {
     uint8_t challenge[32];
     Blake3 b;
@@ -1471,6 +1476,7 @@ static void init_route(Route *route, const char *ip, int port, const uint8_t *pu
 }
 
 // DNS over HTTPS (Simplified)
+__attribute__((unused))
 static int resolve_dns(const char *domain, char *ip, size_t ip_len) {
     // Placeholder for DoH: returns a hardcoded IP for simplicity
     strncpy(ip, "192.168.1.1", ip_len);
@@ -1643,7 +1649,10 @@ static void *worker_thread(void *arg) {
             xsalsa20_init(&xsalsa, session->shared_secret, rx_nonce);
             xsalsa20_encrypt_simd(&xsalsa, buffer + 8, packet, data_len - TAG_LEN - 8);
 
-            write(session->tun_fd, packet, data_len - TAG_LEN - 8);
+            ssize_t written = write(session->tun_fd, packet, data_len - TAG_LEN - 8);
+            if (written < 0) {
+                perror("Failed to write to TUN device");
+            }
         }
         session->last_active = time(NULL);
     }

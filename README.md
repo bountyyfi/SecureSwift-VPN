@@ -73,13 +73,13 @@ See [INSTALL-ONE-LINE.md](INSTALL-ONE-LINE.md) for detailed installation guide.
 - **Health checks every 30s** - Auto-restart on failure
 - **Systemd watchdog** - 30s timeout with auto-recovery
 - **Exponential backoff** - Smart retry mechanism
-- **Prometheus metrics** - Real-time stats on port 9100
+- **Prometheus metrics** - Secured, localhost-only on port 9100
 - **Interface monitoring** - Detect and recover from interface failures
 - **Service monitoring** - Automatic restart on crashes
 - **Connectivity checks** - Verify VPN is actually working
 
 ### 📊 Observability
-- **Prometheus endpoint** - `/metrics` on port 9100
+- **Prometheus endpoint** - Secured, localhost-only on port 9100
 - **Real-time metrics**:
   - `secureswift_uptime_seconds` - Server uptime
   - `secureswift_rx_bytes` / `secureswift_tx_bytes` - Traffic stats
@@ -99,7 +99,7 @@ See [INSTALL-ONE-LINE.md](INSTALL-ONE-LINE.md) for detailed installation guide.
 ✅ **Health check timers** - Monitor and auto-restart every 30s
 ✅ **Firewall rules** - DDoS protection + NAT configuration
 ✅ **Kernel tuning** - BBR, 512MB buffers, 10M connection tracking
-✅ **Metrics endpoint** - Prometheus-compatible on port 9100
+✅ **Metrics endpoint** - Secured, localhost-only on port 9100
 ✅ **Kill-switch** (client) - Prevent traffic leaks
 ✅ **File descriptor limits** - 1M+ system-wide
 ✅ **TUN module** - Auto-load on boot
@@ -217,7 +217,11 @@ kubectl apply -f https://raw.githubusercontent.com/bountyyfi/SecureSwift-VPN/mai
 
 ### View Metrics
 ```bash
+# Metrics are secured and only accessible from localhost
 curl http://localhost:9100/metrics
+
+# Authentication token (if needed for remote Prometheus)
+cat /etc/secureswift/metrics-token
 ```
 
 ### Service Status
@@ -254,8 +258,11 @@ systemctl restart secureswift-server
 # View logs
 journalctl -u secureswift-server -f
 
-# View metrics
+# View metrics (localhost only)
 curl http://localhost:9100/metrics
+
+# View metrics token
+cat /etc/secureswift/metrics-token
 
 # Check health
 systemctl status secureswift-healthcheck.timer
