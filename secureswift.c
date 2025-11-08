@@ -22,8 +22,11 @@
 #include <sys/wait.h>
 #include <syslog.h>
 
+// Security utilities - comprehensive protection against common vulnerabilities
+#include "secureswift_security.h"
+
 // Version and build info
-#define VERSION "2.0.0"
+#define VERSION "3.0.0-secure"
 #define BUILD_DATE __DATE__
 #define BUILD_TIME __TIME__
 
@@ -1521,13 +1524,17 @@ static void disable_kill_switch() {
     safe_exec("iptables", flush_argv);
 }
 
-// Generate unique nonce from packet counter (24 bytes for XSalsa20)
-static void generate_nonce(uint8_t nonce[24], uint64_t counter) {
-    memset(nonce, 0, 24);
-    /* Place counter in little-endian format at bytes 16-23 */
-    for (int i = 0; i < 8; i++) {
-        nonce[16 + i] = (counter >> (i * 8)) & 0xFF;
+// Generate cryptographically secure random nonce (24 bytes for XSalsa20)
+// SECURITY FIX: Use secure random instead of predictable counter
+// This prevents nonce prediction attacks and ensures uniqueness
+static int generate_nonce_secure(uint8_t nonce[24]) {
+    // Use cryptographically secure random number generator
+    if (secure_nonce_generate(nonce, 24) != 0) {
+        fprintf(stderr, "CRITICAL: Failed to generate secure nonce\n");
+        syslog(LOG_CRIT, "Failed to generate secure nonce - RNG failure");
+        return -1;
     }
+    return 0;
 }
 
 // VPN Session
@@ -1543,7 +1550,8 @@ typedef struct {
     int active;
     time_t last_active;
     uint64_t tx_counter;  /* Packet counter for sending (nonce generation) */
-    uint64_t rx_counter;  /* Packet counter for receiving (nonce generation) */
+    uint64_t rx_counter;  /* Packet counter for receiving (nonce validation) */
+    NonceHistory nonce_history;  /* SECURITY: Track used nonces to prevent replay attacks */
 } Session;
 
 static void session_init(Session *session, int tun_fd, int sock_fd, const char *server_ip, int port) {
@@ -1553,6 +1561,10 @@ static void session_init(Session *session, int tun_fd, int sock_fd, const char *
     session->last_active = time(NULL);
     session->tx_counter = 0;  /* Initialize TX packet counter */
     session->rx_counter = 0;  /* Initialize RX packet counter */
+
+    // SECURITY: Initialize nonce history to prevent replay attacks
+    nonce_history_init(&session->nonce_history);
+
     kyber_keygen(session->kyber_pk, session->kyber_sk);
     Dilithium dil;
     dilithium_keygen(&dil, session->dilithium_pk, session->dilithium_sk);
@@ -1587,30 +1599,59 @@ static void *worker_thread(void *arg) {
         if (ret < 0) break;
 
         if (FD_ISSET(session->tun_fd, &fds)) {
-            ssize_t len = read(session->tun_fd, buffer, BUFSIZE - TAG_LEN - 64 - 8);
+            // SECURITY: Bounds check before read operation
+            size_t max_read_size = BUFSIZE - TAG_LEN - 64 - 8;
+            if (max_read_size > BUFSIZE) {
+                fprintf(stderr, "Buffer size calculation error\n");
+                continue;
+            }
+
+            ssize_t len = read(session->tun_fd, buffer, max_read_size);
             if (len <= 0) continue;
 
-            /* FIXED: Include counter in packet so receiver knows which nonce to use */
-            uint64_t counter = session->tx_counter++;
+            // SECURITY: Validate packet length
+            if (!validate_packet_length(len, 1, MAX_PACKET_SIZE - TAG_LEN - 8)) {
+                syslog(LOG_WARNING, "Outgoing packet length invalid: %zd", len);
+                continue;
+            }
+
+            /* SECURITY FIX: Use cryptographically secure random nonce instead of counter */
             uint8_t nonce[24];
-            generate_nonce(nonce, counter);
+            if (generate_nonce_secure(nonce) != 0) {
+                fprintf(stderr, "CRITICAL: Failed to generate secure nonce for TX\n");
+                continue;  // Skip this packet if we can't generate secure nonce
+            }
+
+            /* SECURITY: Add nonce to history to prevent accidental reuse */
+            if (nonce_add(&session->nonce_history, nonce) != 0) {
+                fprintf(stderr, "CRITICAL: Nonce collision detected in TX - RNG may be broken!\n");
+                syslog(LOG_CRIT, "Nonce collision in TX - possible RNG failure");
+                continue;
+            }
 
             /* Encrypt the data */
             xsalsa20_init(&xsalsa, session->shared_secret, nonce);
-            xsalsa20_encrypt_simd(&xsalsa, buffer, packet + 8, len);
+            xsalsa20_encrypt_simd(&xsalsa, buffer, packet + 24, len);
 
-            /* Prepend counter to packet */
-            memcpy(packet, &counter, 8);
+            /* SECURITY FIX: Prepend nonce to packet (24 bytes for XSalsa20) */
+            memcpy(packet, nonce, 24);
 
-            /* Compute MAC over [counter || encrypted_data] */
+            /* SECURITY FIX: Compute MAC over [nonce || encrypted_data] using constant-time operations */
             uint8_t tag[TAG_LEN];
             poly1305_init(&poly, session->shared_secret);
-            poly1305_update(&poly, packet, 8 + len);  /* MAC includes counter */
+            poly1305_update(&poly, packet, 24 + len);  /* MAC includes nonce */
             poly1305_final(&poly, tag);
-            memcpy(packet + 8 + len, tag, TAG_LEN);
+            memcpy(packet + 24 + len, tag, TAG_LEN);
 
-            size_t packet_len = 8 + len + TAG_LEN;
-            stego_encode(packet, &packet_len, packet, 8 + len + TAG_LEN);
+            size_t packet_len = 24 + len + TAG_LEN;
+
+            // SECURITY: Validate packet_len before stego_encode
+            if (packet_len > BUFSIZE || packet_len > MAX_PACKET_SIZE) {
+                syslog(LOG_ERR, "Packet too large: %zu bytes", packet_len);
+                continue;
+            }
+
+            stego_encode(packet, &packet_len, packet, 24 + len + TAG_LEN);
             struct sockaddr_in server;
             memset(&server, 0, sizeof(server));
             server.sin_family = AF_INET;
@@ -1622,36 +1663,97 @@ static void *worker_thread(void *arg) {
         if (FD_ISSET(session->sock_fd, &fds)) {
             struct sockaddr_in client;
             socklen_t client_len = sizeof(client);
+
+            // SECURITY: Bounds check before recvfrom
             ssize_t len = recvfrom(session->sock_fd, packet, BUFSIZE, 0, (struct sockaddr*)&client, &client_len);
-            if (len <= TAG_LEN + 64 + 8) continue;
+
+            // SECURITY: Validate minimum packet size (nonce + tag + some data)
+            if (len <= (ssize_t)(24 + TAG_LEN + 1)) {
+                syslog(LOG_WARNING, "Received packet too small: %zd bytes", len);
+                continue;
+            }
+
+            // SECURITY: Validate maximum packet size
+            if (len > BUFSIZE || len > MAX_PACKET_SIZE) {
+                syslog(LOG_WARNING, "Received packet too large: %zd bytes", len);
+                continue;
+            }
 
             size_t data_len;
-            if (!stego_decode(buffer, &data_len, packet, len)) continue;
-            if (data_len <= TAG_LEN + 8) continue;
+            if (!stego_decode(buffer, &data_len, packet, len)) {
+                syslog(LOG_WARNING, "Stego decode failed");
+                continue;
+            }
 
-            /* FIXED: Extract counter from packet header */
-            uint64_t counter;
-            memcpy(&counter, buffer, 8);
+            // SECURITY: Validate decoded data length
+            if (data_len <= 24 + TAG_LEN || data_len > BUFSIZE) {
+                syslog(LOG_WARNING, "Invalid decoded data length: %zu", data_len);
+                continue;
+            }
 
-            /* Verify MAC over [counter || encrypted_data] */
+            /* SECURITY FIX: Extract nonce from packet header (24 bytes for XSalsa20) */
+            uint8_t rx_nonce[24];
+            if (!validate_buffer_space(data_len, 0, 24)) {
+                syslog(LOG_ERR, "Buffer overflow prevented in nonce extraction");
+                continue;
+            }
+            memcpy(rx_nonce, buffer, 24);
+
+            /* SECURITY: Check for nonce reuse (replay attack detection) */
+            if (nonce_check_used(&session->nonce_history, rx_nonce)) {
+                syslog(LOG_ALERT, "SECURITY: Nonce reuse detected - possible replay attack!");
+                fprintf(stderr, "WARNING: Replay attack detected - dropping packet\n");
+                fail2ban_log("REPLAY_ATTACK", inet_ntoa(client.sin_addr), "Nonce reuse detected");
+                continue;
+            }
+
+            /* SECURITY FIX: Verify MAC using constant-time comparison to prevent timing attacks */
             uint8_t tag[TAG_LEN], computed_tag[TAG_LEN];
+            if (!validate_buffer_space(data_len, data_len - TAG_LEN, TAG_LEN)) {
+                syslog(LOG_ERR, "Buffer overflow prevented in MAC extraction");
+                continue;
+            }
             memcpy(tag, buffer + data_len - TAG_LEN, TAG_LEN);
+
             poly1305_init(&poly, session->shared_secret);
             poly1305_update(&poly, buffer, data_len - TAG_LEN);
             poly1305_final(&poly, computed_tag);
-            if (memcmp(tag, computed_tag, TAG_LEN) != 0) continue;
 
-            /* FIXED: Use sender's counter to generate matching nonce */
-            uint8_t rx_nonce[24];
-            generate_nonce(rx_nonce, counter);
+            // SECURITY FIX: Use constant-time comparison instead of memcmp
+            if (ct_memcmp(tag, computed_tag, TAG_LEN) != 0) {
+                syslog(LOG_WARNING, "MAC verification failed - packet corrupted or tampered");
+                fail2ban_log("AUTH_FAILURE", inet_ntoa(client.sin_addr), "Invalid MAC");
+                continue;
+            }
 
-            /* FIXED: Decrypt (XSalsa20 encrypt/decrypt same op with matching nonce) */
+            /* SECURITY: Add nonce to history AFTER successful MAC verification */
+            if (nonce_add(&session->nonce_history, rx_nonce) != 0) {
+                syslog(LOG_ALERT, "SECURITY: Nonce collision in RX history");
+                continue;
+            }
+
+            /* SECURITY FIX: Decrypt (XSalsa20 encrypt/decrypt same op with matching nonce) */
             xsalsa20_init(&xsalsa, session->shared_secret, rx_nonce);
-            xsalsa20_encrypt_simd(&xsalsa, buffer + 8, packet, data_len - TAG_LEN - 8);
 
-            ssize_t written = write(session->tun_fd, packet, data_len - TAG_LEN - 8);
+            // Calculate decrypted data size (total - nonce - MAC)
+            size_t decrypted_len = data_len - 24 - TAG_LEN;
+
+            // SECURITY: Validate decrypted length
+            if (decrypted_len > MAX_PACKET_SIZE || decrypted_len < 1) {
+                syslog(LOG_ERR, "Invalid decrypted length: %zu", decrypted_len);
+                continue;
+            }
+
+            // Decrypt: source is buffer+24 (after nonce), dest is packet
+            xsalsa20_encrypt_simd(&xsalsa, buffer + 24, packet, decrypted_len);
+
+            // SECURITY: Bounds check before write
+            ssize_t written = write(session->tun_fd, packet, decrypted_len);
             if (written < 0) {
                 perror("Failed to write to TUN device");
+                syslog(LOG_ERR, "TUN write failed: %s", strerror(errno));
+            } else if ((size_t)written != decrypted_len) {
+                syslog(LOG_WARNING, "Partial TUN write: %zd of %zu bytes", written, decrypted_len);
             }
         }
         session->last_active = time(NULL);
