@@ -60,9 +60,10 @@
 #define DILITHIUM_BETA 175
 #define DILITHIUM_GAMMA1 (1 << 19)
 #define DILITHIUM_GAMMA2 (DILITHIUM_Q-1)/16
-#define DILITHIUM_SIGBYTES 2420
-#define DILITHIUM_PUBKEYBYTES 1312
-#define DILITHIUM_SECKEYBYTES 2528
+// Signature contains: z (L polys) + c (1 poly) + w1 (K polys) = (L+1+K) * KYBER_POLYBYTES
+#define DILITHIUM_SIGBYTES ((DILITHIUM_L + 1 + DILITHIUM_K) * KYBER_POLYBYTES)  // 4608 bytes
+#define DILITHIUM_PUBKEYBYTES (DILITHIUM_K * KYBER_POLYBYTES + 32)  // 1952 bytes
+#define DILITHIUM_SECKEYBYTES (DILITHIUM_K * KYBER_POLYBYTES + 32 + (DILITHIUM_L + DILITHIUM_K) * KYBER_POLYBYTES + 32)  // 6176 bytes
 #define CURVE25519_BYTES 32
 #define BLAKE3_OUT_LEN 32
 #define MAX_HOPS 3
@@ -715,8 +716,11 @@ typedef struct {
     int32_t coeffs[KYBER_N];
 } poly;
 
+// Maximum of KYBER_K, DILITHIUM_K, DILITHIUM_L for compatibility
+#define MAX_POLYVEC_SIZE ((DILITHIUM_L > DILITHIUM_K) ? DILITHIUM_L : DILITHIUM_K)
+
 typedef struct {
-    poly vec[KYBER_K];
+    poly vec[MAX_POLYVEC_SIZE];  // Use max size to support both Kyber and Dilithium
 } polyvec;
 
 static const int16_t zetas[128] = {
@@ -1266,9 +1270,10 @@ static void dilithium_keygen(Dilithium *self, uint8_t *pk, uint8_t *sk) {
     polyvec_add(&t1, &t1, &s2);
     polyvec_reduce(&t1);
 
-    memcpy(self->s1, s1.vec, sizeof(s1));
-    memcpy(self->s2, s2.vec, sizeof(s2));
-    memcpy(self->t1, t1.vec, sizeof(t1));
+    // Copy only the elements we actually use (not the whole polyvec struct)
+    memcpy(self->s1, s1.vec, DILITHIUM_L * sizeof(poly));
+    memcpy(self->s2, s2.vec, DILITHIUM_K * sizeof(poly));
+    memcpy(self->t1, t1.vec, DILITHIUM_K * sizeof(poly));
     dilithium_polyvec_tobytes(pk, &t1, DILITHIUM_K);
     memcpy(pk + DILITHIUM_K * KYBER_POLYBYTES, self->rho, 32);
     dilithium_polyvec_tobytes(sk, &t1, DILITHIUM_K);

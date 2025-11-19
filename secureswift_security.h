@@ -16,11 +16,14 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
+#include <time.h>
 #include <limits.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/random.h>
 #include <errno.h>
+#include <pthread.h>
 
 /* ============================================================================
  * SECURE RANDOM NUMBER GENERATION
@@ -51,7 +54,7 @@ static inline int secure_random_bytes(void *buf, size_t len) {
         if (result > 0 && result < (ssize_t)len) {
             // Got partial data, continue with /dev/urandom for rest
             buf = (uint8_t*)buf + result;
-            len -= result;
+            len -= (size_t)result;
         } else if (result < 0 && errno != ENOSYS && errno != EAGAIN) {
             return -1;
         }
@@ -71,7 +74,7 @@ static inline int secure_random_bytes(void *buf, size_t len) {
             close(fd);
             return -1;
         }
-        total += n;
+        total += (size_t)n;
     }
 
     close(fd);
@@ -137,7 +140,7 @@ static inline uint32_t ct_select_u32(uint32_t condition, uint32_t a, uint32_t b)
  * Constant-time conditional select for bytes
  */
 static inline uint8_t ct_select_u8(uint8_t condition, uint8_t a, uint8_t b) {
-    uint8_t mask = -(uint8_t)(condition != 0);
+    uint8_t mask = (uint8_t)(-(int)(condition != 0));
     return (a & mask) | (b & ~mask);
 }
 
@@ -361,7 +364,7 @@ static inline int nonce_add(NonceHistory *history, const uint8_t *nonce) {
     // Add to history (circular buffer)
     size_t idx = history->next_index;
     memcpy(history->entries[idx].nonce, nonce, 24);
-    history->entries[idx].timestamp = time(NULL);
+    history->entries[idx].timestamp = (uint64_t)time(NULL);
     history->entries[idx].used = 1;
 
     history->next_index = (history->next_index + 1) % NONCE_HISTORY_SIZE;
