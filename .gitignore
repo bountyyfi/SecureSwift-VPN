@@ -1,5 +1,6 @@
 # Compiled binaries
 secureswift
+crypto_tests
 sswctl
 test_unit
 test_integration
